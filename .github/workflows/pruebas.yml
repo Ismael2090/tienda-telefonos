@@ -1,0 +1,61 @@
+name: Pruebas automáticas
+
+# Se ejecuta cada vez que subes cambios (push) o abres un pull request
+on: [push, pull_request]
+
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Instalar PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_sqlite, sqlite3
+
+      # Prueba de regresión: detecta errores de sintaxis en cualquier archivo PHP
+      - name: Revisar sintaxis de todos los archivos PHP
+        run: find . -name "*.php" -print0 | xargs -0 -n1 php -l
+
+      - name: Iniciar el servidor de la tienda
+        run: |
+          php -S 127.0.0.1:8000 > server.log 2>&1 &
+          sleep 2
+
+      # Prueba de humo: las páginas públicas cargan sin errores de PHP
+      - name: Páginas públicas cargan bien
+        run: |
+          for p in index.php login.php registro.php carrito.php; do
+            code=$(curl -s -o out.html -w "%{http_code}" http://127.0.0.1:8000/$p)
+            echo "$p -> $code"
+            [ "$code" = "200" ] || { echo "FALLO: $p devolvió $code"; exit 1; }
+            if grep -q -e "<b>Warning</b>" -e "<b>Fatal error</b>" -e "<b>Parse error</b>" -e "<b>Notice</b>" -e "<b>Deprecated</b>" out.html; then
+              echo "FALLO: error de PHP en $p"; exit 1
+            fi
+          done
+
+      # Prueba funcional: el panel de administrador está protegido
+      - name: Admin sin sesión debe redirigir al login
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/admin.php)
+          [ "$code" = "302" ] || { echo "FALLO: admin.php dio $code y debía redirigir (302)"; exit 1; }
+
+      # Prueba funcional: contraseña incorrecta no deja entrar
+      - name: Login con clave incorrecta es rechazado
+        run: |
+          curl -s -d "usuario=admin&clave=incorrecta" http://127.0.0.1:8000/login.php | grep -q "incorrectos" \
+            || { echo "FALLO: no mostró el mensaje de clave incorrecta"; exit 1; }
+
+      # Prueba funcional: el administrador puede entrar y ver su panel
+      - name: Login correcto entra al panel
+        run: |
+          curl -s -c jar.txt -o /dev/null -d "usuario=admin&clave=admin123" http://127.0.0.1:8000/login.php
+          curl -s -b jar.txt http://127.0.0.1:8000/admin.php | grep -q "Panel del administrador" \
+            || { echo "FALLO: el admin no pudo ver su panel"; exit 1; }
+
+      - name: Mostrar el registro del servidor si algo falló
+        if: failure()
+        run: cat server.log
